@@ -5,15 +5,17 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
-use thiserror::Error;
 use tokio::spawn;
+use tracing::warn;
 use tracing::{info, Level, debug, trace_span, trace, error};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::Subscriber;
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Error, Debug)]
-pub enum MsgrError {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("Parsing client address")]
+    ClientAddress(#[from] std::net::AddrParseError),
     #[error("Cannot read from socket")]
     SocketReadError(#[from] std::io::Error),
 }
@@ -24,22 +26,25 @@ async fn main() {
         .with_span_events(FmtSpan::ACTIVE)
         .with_max_level(Level::TRACE)
         .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Could not initialize tracing");
-    server().await;
+    match tracing::subscriber::set_global_default(subscriber) {
+        Ok(()) => (),
+        Err(err) => warn!("Failed to initialize tracing subscriber: {err:#?}"),
+    }
+    let _ = server().await;
 }
 
-async fn server() {
-    let addr = "0.0.0.0:0".parse::<SocketAddr>().unwrap();
+async fn server() -> Result<(), Error> {
+    let addr = "0.0.0.0:0".parse::<SocketAddr>()?;
     debug!("Starting listener on address {addr:#?}");
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let listener = TcpListener::bind(addr).await?;
     info!("Started listener on address {:#?}", listener.local_addr());
     loop {
-        let (socket, _) = listener.accept().await.unwrap();
+        let (socket, _) = listener.accept().await?;
         spawn(async move { connection_listener(socket).await });
     }
 }
 
-async fn write_message(socket: &mut TcpStream, contents: &[u8]) -> Result<(), MsgrError> {
+async fn write_message(socket: &mut TcpStream, contents: &[u8]) -> Result<(), Error> {
     debug!("Sending message \"{:?}\"", &contents);
     Ok(socket.write_all(contents).await?)
 }
@@ -59,17 +64,17 @@ async fn connection_listener(mut socket: TcpStream) {
             Ok(n) => {
                 trace!("Read {n} bytes from socket {:?}", socket.peer_addr());
                 let message = &buf[0..n];
-                println!("Got message:\n{:?}", message);
+                debug!("Got message:\n{message:?}");
                 if let Err(err) = write_message(&mut socket, message).await {
-                    error!("Could not send message: {:#?}", err);
+                    error!("Could not send message: {err:#?}");
                 }
             }
-            Err(err) => error!("Could not deserialize message: {:#?}", err),
+            Err(err) => error!("Could not deserialize message: {err:#?}"),
         };
     }
 }
 
-async fn read_incoming_bytes(socket: &mut TcpStream, buf: &mut [u8]) -> Result<usize, MsgrError> {
+async fn read_incoming_bytes(socket: &mut TcpStream, buf: &mut [u8]) -> Result<usize, Error> {
     trace!("Processing incoming from {:?}", socket.peer_addr());
     let n = socket.read(buf).await?;
     Ok(n)
